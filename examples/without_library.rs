@@ -8,16 +8,9 @@ use xml::escape::escape_str_attribute;
 // with the following features:
 //    "Data_Xml_Dom"
 //    "UI_Notifications"
-use windows::{
-    Data::Xml::Dom::XmlDocument,
-    UI::Notifications::ToastNotification,
-    UI::Notifications::ToastNotificationManager,
-};
+use windows::{Data::Xml::Dom::XmlDocument, UI::Notifications::ToastNotification, UI::Notifications::ToastNotificationManager};
 
-pub use windows::runtime::{
-    Error,
-    HSTRING,
-};
+pub use windows::runtime::{Error, HSTRING};
 
 fn main() {
     do_toast().expect("not sure if this is actually failable");

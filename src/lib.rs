@@ -33,20 +33,25 @@ extern crate xml;
 #[macro_use]
 extern crate strum;
 
-use windows::{
-    Data::Xml::Dom::XmlDocument,
-    UI::Notifications::ToastNotificationManager,
-};
+use windows::Foundation::TypedEventHandler;
+use windows::UI::Notifications::{ToastDismissalReason, ToastDismissedEventArgs};
+use windows::{Data::Xml::Dom::XmlDocument, UI::Notifications::ToastNotificationManager};
 
+use std::cell::RefCell;
 use std::path::Path;
 
 use xml::escape::escape_str_attribute;
 mod windows_check;
 
-pub use windows::runtime::{Error, HSTRING, Result};
+pub use windows::runtime::{Error, Result, HSTRING};
 pub use windows::UI::Notifications::ToastNotification;
 
-pub struct Toast {
+#[derive(Default)]
+pub struct Toast<FnActivated, FnDismissed>
+where
+    FnActivated: Fn() -> () + 'static,
+    FnDismissed: Fn(Option<ToastDismissalReason>) -> () + 'static,
+{
     duration: String,
     title: String,
     line1: String,
@@ -55,6 +60,9 @@ pub struct Toast {
     audio: String,
     app_id: String,
     scenario: String,
+
+    activated_handler: RefCell<Option<FnActivated>>,
+    dismissed_handler: RefCell<Option<FnDismissed>>,
 }
 
 #[derive(Clone, Copy)]
@@ -127,12 +135,17 @@ pub enum Scenario {
     IncomingCall,
 }
 
-impl Toast {
-    /// This can be used if you do not have a AppUserModelID.
-    ///
-    /// However, the toast will erroniously report its origin as powershell.
-    pub const POWERSHELL_APP_ID: &'static str = "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\
-                                                 \\WindowsPowerShell\\v1.0\\powershell.exe";
+/// This can be used if you do not have a AppUserModelID.
+///
+/// However, the toast will erroniously report its origin as powershell.
+pub const POWERSHELL_APP_ID: &'static str = "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\
+                                                \\WindowsPowerShell\\v1.0\\powershell.exe";
+
+impl<FnActivated, FnDismissed> Toast<FnActivated, FnDismissed>
+where
+    FnActivated: Fn() -> () + 'static,
+    FnDismissed: Fn(Option<ToastDismissalReason>) -> () + 'static,
+{
     /// Constructor for the toast builder.
     ///
     /// app_id is the running application's [AppUserModelID][1].
@@ -141,7 +154,7 @@ impl Toast {
     ///
     /// If the program you are using this in was not installed, use Toast::POWERSHELL_APP_ID for now
     #[allow(dead_code)]
-    pub fn new(app_id: &str) -> Toast {
+    pub fn new(app_id: &str) -> Self {
         Toast {
             duration: String::new(),
             title: String::new(),
@@ -151,6 +164,8 @@ impl Toast {
             audio: String::new(),
             app_id: app_id.to_string(),
             scenario: String::new(),
+            activated_handler: RefCell::new(None),
+            dismissed_handler: RefCell::new(None),
         }
     }
 
@@ -158,7 +173,7 @@ impl Toast {
     ///
     /// Will be white.
     /// Supports Unicode ✓
-    pub fn title(mut self, content: &str) -> Toast {
+    pub fn title(mut self, content: &str) -> Self {
         self.title = format!(r#"<text id="1">{}</text>"#, escape_str_attribute(content));
         self
     }
@@ -167,7 +182,7 @@ impl Toast {
     ///
     /// Will be grey.
     /// Supports Unicode ✓
-    pub fn text1(mut self, content: &str) -> Toast {
+    pub fn text1(mut self, content: &str) -> Self {
         self.line1 = format!(r#"<text id="2">{}</text>"#, escape_str_attribute(content));
         self
     }
@@ -176,13 +191,13 @@ impl Toast {
     ///
     /// Will be grey.
     /// Supports Unicode ✓
-    pub fn text2(mut self, content: &str) -> Toast {
+    pub fn text2(mut self, content: &str) -> Self {
         self.line2 = format!(r#"<text id="3">{}</text>"#, escape_str_attribute(content));
         self
     }
 
     /// Set the length of time to show the toast
-    pub fn duration(mut self, duration: Duration) -> Toast {
+    pub fn duration(mut self, duration: Duration) -> Self {
         self.duration = match duration {
             Duration::Long => "duration=\"long\"",
             Duration::Short => "duration=\"short\"",
@@ -195,7 +210,7 @@ impl Toast {
     ///
     /// The system keeps the notification on screen until the user acts upon/dismisses it.
     /// The system also plays the suitable notification sound as well.
-    pub fn scenario(mut self, scenario: Scenario) -> Toast {
+    pub fn scenario(mut self, scenario: Scenario) -> Self {
         self.scenario = match scenario {
             Scenario::Default => "",
             Scenario::Alarm => "scenario=\"alarm\"",
@@ -206,12 +221,11 @@ impl Toast {
         self
     }
 
-
     /// Set the icon shown in the upper left of the toast
     ///
     /// The default is determined by your app id.
     /// If you are using the powershell workaround, it will be the powershell icon
-    pub fn icon(mut self, source: &Path, crop: IconCrop, alt_text: &str) -> Toast {
+    pub fn icon(mut self, source: &Path, crop: IconCrop, alt_text: &str) -> Self {
         if windows_check::is_newer_than_windows81() {
             let crop_type_attr = match crop {
                 IconCrop::Square => "".to_string(),
@@ -235,7 +249,7 @@ impl Toast {
     /// Add/Set a Hero image for the toast.
     ///
     /// This will be above the toast text and the icon.
-    pub fn hero(mut self, source: &Path, alt_text: &str) -> Toast {
+    pub fn hero(mut self, source: &Path, alt_text: &str) -> Self {
         if windows_check::is_newer_than_windows81() {
             self.images = format!(
                 r#"{}<image placement="Hero" src="file:///{}" alt="{}" />"#,
@@ -254,7 +268,7 @@ impl Toast {
     ///
     /// May be done many times.
     /// Will appear below text.
-    pub fn image(mut self, source: &Path, alt_text: &str) -> Toast {
+    pub fn image(mut self, source: &Path, alt_text: &str) -> Self {
         if !windows_check::is_newer_than_windows81() {
             // win81 cannot have more than 1 image and shows nothing if there is more than that
             self.images = "".to_owned();
@@ -271,7 +285,7 @@ impl Toast {
     /// Set the sound for the toast or silence it
     ///
     /// Default is [Sound::IM](enum.Sound.html)
-    pub fn sound(mut self, src: Option<Sound>) -> Toast {
+    pub fn sound(mut self, src: Option<Sound>) -> Self {
         self.audio = match src {
             None => "<audio silent=\"true\" />".to_owned(),
             Some(Sound::Default) => "".to_owned(),
@@ -280,6 +294,16 @@ impl Toast {
             Some(sound) => format!(r#"<audio src="ms-winsoundevent:Notification.{}" />"#, sound),
         };
 
+        self
+    }
+
+    pub fn on_activated(self, activated_fn: FnActivated) -> Self {
+        *self.activated_handler.borrow_mut() = Some(activated_fn);
+        self
+    }
+
+    pub fn on_dismissed(self, dismissed_fn: FnDismissed) -> Self {
+        *self.dismissed_handler.borrow_mut() = Some(dismissed_fn);
         self
     }
 
@@ -310,14 +334,7 @@ impl Toast {
                     </visual>
                     {}
                 </toast>",
-            self.duration,
-            self.scenario,
-            template_binding,
-            self.images,
-            self.title,
-            self.line1,
-            self.line2,
-            self.audio,
+            self.duration, self.scenario, template_binding, self.images, self.title, self.line1, self.line2, self.audio,
         )))?;
 
         // Create the toast
@@ -327,6 +344,25 @@ impl Toast {
     /// Display the toast on the screen
     pub fn show(&self) -> windows::runtime::Result<()> {
         let toast_template = self.create_template()?;
+
+        if let Some(activated_fn) = self.activated_handler.take() {
+            toast_template.Activated(TypedEventHandler::new(move |_sender, _args| {
+                activated_fn();
+                Ok(())
+            }))?;
+        }
+
+        if let Some(dismissed_fn) = self.dismissed_handler.take() {
+            toast_template.Dismissed(TypedEventHandler::<ToastNotification, ToastDismissedEventArgs>::new(
+                move |_sender, arg| {
+                    match arg.as_ref().map(|x| x.Reason()) {
+                        Some(Ok(reason)) => dismissed_fn(Some(reason)),
+                        _ => dismissed_fn(None),
+                    }
+                    Ok(())
+                },
+            ))?;
+        }
 
         let toast_notifier = ToastNotificationManager::CreateToastNotifierWithId(HSTRING::from(&self.app_id))?;
 
@@ -344,8 +380,7 @@ mod tests {
 
     #[test]
     fn simple_toast() {
-        let toast = Toast::new(Toast::POWERSHELL_APP_ID);
-        toast
+        Toast::new(POWERSHELL_APP_ID)
             .hero(&Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/test/flower.jpeg"), "flower")
             .icon(
                 &Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/test/chick.jpeg"),
@@ -359,6 +394,8 @@ mod tests {
             //.sound(Some(Sound::Loop(LoopableSound::Call)))
             //.sound(Some(Sound::SMS))
             .sound(None)
+            .on_activated(|| println!("activated!"))
+            .on_dismissed(|reason| println!("dismissed: {:?}", reason))
             .show()
             // silently consume errors
             .expect("notification failed");
